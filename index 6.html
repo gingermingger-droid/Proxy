@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privat Browsen</title>
+<style>
+  :root{--bg:#fff;--fg:#1a1a1a;--bar:#f1f3f5;--bd:#d0d5da;--ac:#2563eb}
+  @media(prefers-color-scheme:dark){:root{--bg:#15171a;--fg:#e8e8e8;--bar:#22252a;--bd:#3a3f46;--ac:#60a5fa}}
+  html,body{height:100%;margin:0}
+  body{display:flex;flex-direction:column;background:var(--bg);color:var(--fg);font:15px system-ui,sans-serif}
+  header{display:flex;gap:6px;padding:8px;background:var(--bar);border-bottom:1px solid var(--bd)}
+  input,select,button{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--bd);border-radius:8px;padding:7px 10px}
+  #url{flex:1;min-width:0}
+  button{cursor:pointer}button:hover{border-color:var(--ac)}
+  #status{padding:4px 10px;font-size:12px;opacity:.7;border-bottom:1px solid var(--bd)}
+  iframe{flex:1;width:100%;border:0;background:#fff}
+  details{padding:6px 10px;font-size:13px;background:var(--bar);border-bottom:1px solid var(--bd)}
+</style>
+</head>
+<body>
+<header>
+  <button id="back" title="Zurück">←</button>
+  <input id="url" placeholder="Adresse oder Suchbegriff" autocomplete="off">
+  <button id="go">Los</button>
+</header>
+<details>
+  <summary>Einstellungen</summary>
+  Proxy:
+  <select id="proxy">
+    <option value="https://corsproxy.io/?url=">corsproxy.io</option>
+    <option value="https://api.allorigins.win/raw?url=">allorigins.win</option>
+  </select>
+  <input id="custom" placeholder="Eigener Proxy (z. B. https://dein-worker.workers.dev/?url=)" style="width:min(420px,90%)">
+</details>
+<div id="status">Bereit.</div>
+<iframe id="view" sandbox="allow-same-origin"></iframe>
+
+<script>
+const $ = id => document.getElementById(id);
+const view = $('view'), urlIn = $('url'), status = $('status');
+let hist = [];
+
+// Einstellungen laden/speichern
+try {
+  $('proxy').value = localStorage.getItem('proxy') || $('proxy').value;
+  $('custom').value = localStorage.getItem('custom') || '';
+} catch(e){}
+function proxyBase(){ return $('custom').value.trim() || $('proxy').value; }
+$('proxy').onchange = $('custom').onchange = () => {
+  try{ localStorage.setItem('proxy',$('proxy').value); localStorage.setItem('custom',$('custom').value);}catch(e){}
+};
+const P = u => proxyBase() + encodeURIComponent(u);
+const abs = (u, base) => { try { return new URL(u, base).href } catch { return null } };
+
+async function get(u){
+  const r = await fetch(P(u));
+  if(!r.ok) throw new Error('HTTP ' + r.status);
+  return r;
+}
+
+function normalize(q){
+  q = q.trim();
+  if(!q) return null;
+  if(/^https?:\/\//i.test(q)) return q;
+  if(/^[\w-]+(\.[\w-]+)+(\/.*)?$/.test(q)) return 'https://' + q;
+  return 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(q);
+}
+
+async function load(target, push = true){
+  if(!target) return;
+  status.textContent = 'Lade ' + target + ' …';
+  try {
+    const html = await (await get(target)).text();
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+
+    // Alles Aktive entfernen
+    doc.querySelectorAll('script,iframe,frame,object,embed,base,audio,video,source,meta[http-equiv]').forEach(n => n.remove());
+    doc.querySelectorAll('*').forEach(n => [...n.attributes].forEach(a => { if(/^on/i.test(a.name)) n.removeAttribute(a.name); }));
+
+    // Bilder über den Proxy laden
+    doc.querySelectorAll('img').forEach(img => {
+      const s = img.getAttribute('data-src') || img.getAttribute('src');
+      img.removeAttribute('srcset'); img.removeAttribute('loading');
+      const a = s && abs(s, target);
+      if(a && /^https?:/.test(a)) img.src = P(a); else img.removeAttribute('src');
+    });
+
+    // Stylesheets holen und einbetten (max. 8)
+    const links = [...doc.querySelectorAll('link[rel~="stylesheet"]')].slice(0, 8);
+    doc.querySelectorAll('link').forEach(l => { if(!links.includes(l)) l.remove(); });
+    await Promise.all(links.map(async l => {
+      const a = abs(l.getAttribute('href'), target);
+      try {
+        let css = await (await get(a)).text();
+        css = css.replace(/@import[^;]+;/g, '')
+                 .replace(/url\(\s*['"]?(?!data:)([^'")]+)['"]?\s*\)/g, (m, u) => {
+                   const x = abs(u, a); return x ? `url("${P(x)}")` : 'none';
+                 });
+        const st = doc.createElement('style'); st.textContent = css; l.replaceWith(st);
+      } catch { l.remove(); }
+    }));
+    doc.querySelectorAll('style').forEach(s => {
+      s.textContent = s.textContent.replace(/url\(\s*['"]?(?!data:)([^'")]+)['"]?\s*\)/g, (m,u)=>{
+        const x = abs(u, target); return x ? `url("${P(x)}")` : 'none';
+      });
+    });
+
+    // Links und Formulare umbiegen
+    doc.querySelectorAll('a[href]').forEach(a => {
+      const x = abs(a.getAttribute('href'), target);
+      a.removeAttribute('target');
+      if(x && /^https?:/.test(x)) a.setAttribute('data-href', x);
+      a.setAttribute('href', '#');
+    });
+    doc.querySelectorAll('form').forEach(f => {
+      f.setAttribute('data-action', abs(f.getAttribute('action') || '', target) || target);
+      f.removeAttribute('action');
+    });
+
+    // CSP: der Browser darf NUR den Proxy kontaktieren
+    const origin = new URL(proxyBase()).origin;
+    const csp = doc.createElement('meta');
+    csp.httpEquiv = 'Content-Security-Policy';
+    csp.content = `default-src 'none'; img-src ${origin} data:; style-src 'unsafe-inline' ${origin}; font-src ${origin} data:`;
+    doc.head.prepend(csp);
+
+    view.srcdoc = '<!doctype html>' + doc.documentElement.outerHTML;
+    urlIn.value = target;
+    if(push) hist.push(target);
+    status.textContent = 'Fertig: ' + target;
+  } catch(e) {
+    status.textContent = 'Fehler: ' + e.message + ' (anderen Proxy probieren?)';
+  }
+}
+
+// Klicks/Formulare im Inhalt abfangen
+view.addEventListener('load', () => {
+  const d = view.contentDocument; if(!d) return;
+  d.addEventListener('click', e => {
+    const a = e.target.closest && e.target.closest('a');
+    if(!a) return;
+    e.preventDefault();
+    const h = a.getAttribute('data-href'); if(h) load(h);
+  });
+  d.addEventListener('submit', e => {
+    e.preventDefault();
+    const f = e.target;
+    const u = new URL(f.getAttribute('data-action'));
+    if((f.method || 'get').toLowerCase() !== 'get') { status.textContent = 'POST-Formulare (Logins) werden nicht unterstützt.'; return; }
+    new FormData(f).forEach((v,k) => { if(typeof v === 'string') u.searchParams.set(k, v); });
+    load(u.href);
+  });
+});
+
+$('go').onclick = () => load(normalize(urlIn.value));
+urlIn.onkeydown = e => { if(e.key === 'Enter') $('go').click(); };
+$('back').onclick = () => { if(hist.length > 1){ hist.pop(); load(hist[hist.length-1], false); } };
+</script>
+</body>
+</html>
