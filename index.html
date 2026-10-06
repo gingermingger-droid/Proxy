@@ -28,8 +28,7 @@
   <summary>Einstellungen</summary>
   Proxy:
   <select id="proxy">
-    <option value="https://corsproxy.io/?url=">corsproxy.io</option>
-    <option value="https://api.allorigins.win/raw?url=">allorigins.win</option>
+    <option value="https://api.allorigins.win/raw?url=">allorigins.win (Notlösung)</option>
   </select>
   <input id="custom" placeholder="Eigener Proxy (z. B. https://dein-worker.workers.dev/?url=)" style="width:min(420px,90%)">
 </details>
@@ -130,7 +129,7 @@ async function load(target, push = true){
     if(push) hist.push(target);
     status.textContent = 'Fertig: ' + target;
   } catch(e) {
-    status.textContent = 'Fehler: ' + e.message + ' (anderen Proxy probieren?)';
+    status.textContent = 'Fehler: ' + e.message + ' – Der Proxy antwortet nicht oder blockiert die Seite. Trage unter „Einstellungen" deinen eigenen Worker ein.';
   }
 }
 
